@@ -264,6 +264,7 @@ class VibeChat(Gtk.Application):
         self.installing_update = False
         self.pending_deb = None             # downloaded and verified package waiting to be installed
         self.pending_version = None
+        self.quit_finished = False
 
     # ----- lifecycle -----
     def do_handle_local_options(self, options):
@@ -290,6 +291,7 @@ class VibeChat(Gtk.Application):
         self.add_action(clicked)
         self.add_simple_action("check-updates", lambda *_: self.check_for_updates(True))
         self.add_simple_action("install-update", lambda *_: self.install_update())
+        self.add_simple_action("clear-data", self.on_clear_data)
         GLib.timeout_add_seconds(FIRST_UPDATE_CHECK, self.on_first_update_check)
         for action, keys in (("quit", ["<Primary>q"]), ("hide", ["<Primary>w"]), ("reload", ["F5", "<Primary>r"]),
                              ("zoom-in", ["<Primary>plus", "<Primary>equal", "<Primary>KP_Add"]),
@@ -343,9 +345,28 @@ class VibeChat(Gtk.Application):
         self.quitting = True
         self.save_state()
         self.withdraw_all_notifications()
+        self.cancel_retry()
         if self.window is not None:
-            self.window.destroy()
-        self.quit()
+            self.window.hide()
+        # WhatsApp Web keeps writing its login state. Let the page unload normally and give WebKit a moment to write
+        # its storage out before this process (and with it WebKit's helper processes) ends; cutting it off mid-write
+        # can make WhatsApp ask for the QR code again next time.
+        if self.web is not None:
+            self.web.connect("load-changed", self.on_quit_page_unloaded)
+            self.web.load_uri("about:blank")
+        GLib.timeout_add(2500, self.finish_quit)  # in case the page never unloads
+
+    def on_quit_page_unloaded(self, web, event):
+        if event == WebKit2.LoadEvent.FINISHED:
+            GLib.timeout_add(700, self.finish_quit)  # WebKit writes Local Storage out on a short timer
+
+    def finish_quit(self):
+        if not self.quit_finished:
+            self.quit_finished = True
+            if self.window is not None:
+                self.window.destroy()
+            self.quit()
+        return GLib.SOURCE_REMOVE
 
     # ----- window -----
     def build_window(self):
@@ -607,6 +628,40 @@ class VibeChat(Gtk.Application):
         n.set_icon(Gio.ThemedIcon.new(ICON))
         self.send_notification("download", n)
 
+    # ----- clear data -----
+    def on_clear_data(self, *_):
+        if self.quitting:
+            return
+        self.show_window()
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, message_type=Gtk.MessageType.WARNING,
+                                   buttons=Gtk.ButtonsType.NONE, text="Clear data and sign out?")
+        dialog.format_secondary_text(
+            "This signs %s out on this computer and deletes everything it has stored for WhatsApp Web: the login, "
+            "cached chats and media, and site data.\n\nYou'll scan the QR code again, and WhatsApp will sync fresh.\n\n"
+            "To also remove this computer from your phone's list of linked devices, choose Log out inside WhatsApp "
+            "first." % APP_NAME)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Clear data", Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+        response = dialog.run()
+        dialog.destroy()
+        if response == Gtk.ResponseType.ACCEPT:
+            self.clear_data()
+
+    def clear_data(self):
+        """Remove everything WebKit stores for WhatsApp Web (login, cache, site data), then load it fresh."""
+        self.cancel_retry()
+        self.web.load_uri("about:blank")  # stop WhatsApp Web writing while its data is removed
+        self.web.get_website_data_manager().clear(WebKit2.WebsiteDataTypes.ALL, 0, None, self.on_data_cleared)
+
+    def on_data_cleared(self, manager, result):
+        try:
+            manager.clear_finish(result)
+            log("cleared all WhatsApp Web data at the user's request")
+        except GLib.Error as e:
+            log("clearing data failed: " + e.message)
+        if not self.quitting:
+            self.web.load_uri(START_URL)
+
     # ----- updates -----
     def on_first_update_check(self):
         self.on_periodic_update_check()
@@ -706,9 +761,11 @@ class VibeChat(Gtk.Application):
     def restart(self):
         hidden = not self.window.get_visible()
         exe = shutil.which("vibechat") or "/usr/bin/vibechat"
-        # The new copy starts once this one has gone, so it becomes the single running instance.
-        Gio.Subprocess.new(["/bin/sh", "-c", "sleep 2; exec %s%s" % (shlex.quote(exe), " --hidden" if hidden else "")],
-                           Gio.SubprocessFlags.NONE)
+        # The new copy starts once this process has completely gone (after its careful shutdown), so it becomes the
+        # single running instance and finds WhatsApp's storage fully written.
+        script = "while kill -0 %d 2>/dev/null; do sleep 0.2; done; sleep 0.5; exec %s%s" % (
+            os.getpid(), shlex.quote(exe), " --hidden" if hidden else "")
+        Gio.Subprocess.new(["/bin/sh", "-c", script], Gio.SubprocessFlags.NONE)
         self.quit_app()
 
     def set_update_item(self, label, sensitive):
@@ -759,10 +816,12 @@ class VibeChat(Gtk.Application):
         auto_update_item = Gtk.CheckMenuItem(label="Update automatically")
         auto_update_item.set_active(not os.path.exists(auto_update_flag()))
         auto_update_item.connect("toggled", self.on_auto_update_toggled)
+        clear_item = Gtk.MenuItem(label="Clear data and sign out…")
+        clear_item.connect("activate", self.on_clear_data)
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", lambda *_: self.quit_app())
         for item in (open_item, self.autostart_item, Gtk.SeparatorMenuItem(), version_item, self.update_item,
-                     auto_update_item, Gtk.SeparatorMenuItem(), quit_item):
+                     auto_update_item, Gtk.SeparatorMenuItem(), clear_item, quit_item):
             menu.append(item)
         menu.show_all()
         ind.set_menu(menu)

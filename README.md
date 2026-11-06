@@ -33,6 +33,8 @@ Right-click the tray icon for **Start on login** and **Quit**; middle-click it t
 - Recovers by itself if the web engine crashes, and retries when you're offline
 - Windows: trims its memory use while hidden in the tray. Ubuntu: clicking a message notification opens that chat
 - Keeps itself up to date from this repository's releases (see below)
+- **Clear data and sign out…** in the tray menu wipes everything VibeChat has stored for WhatsApp Web (login, cached chats and media), so you can sign in and sync fresh. To also remove the computer from your phone's linked devices, log out inside WhatsApp first.
+- Stays signed in across restarts: on quit it lets WhatsApp Web finish saving before closing
 
 ## Updates
 

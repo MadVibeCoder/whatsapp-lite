@@ -10,6 +10,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -115,6 +116,8 @@ namespace VibeChat
         readonly EventWaitHandle showEvent;
         readonly EventWaitHandle quitEvent;
         bool quitting;
+        bool shutdownStarted, webClosed, readyToExit;
+        readonly System.Windows.Forms.Timer shutdownTimer = new System.Windows.Forms.Timer();
         bool webInitStarted;
         int browserRestarts;
         int unread = -1;
@@ -147,6 +150,9 @@ namespace VibeChat
             if (Updater.AutoEnabled) updateTimer.Start();
             installTimer.Interval = InstallWhenHiddenMs;
             installTimer.Tick += delegate { installTimer.Stop(); if (!Visible) InstallUpdate(); };
+            // During shutdown: first "the page didn't unload in time, close the engine anyway", then "the engine
+            // didn't report back in time, exit anyway".
+            shutdownTimer.Tick += delegate { shutdownTimer.Stop(); if (!webClosed) CloseWebView(); else FinishExit(); };
 
             // Cross-process signals: a second launch asks us to show; the installer asks us to quit cleanly.
             showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "VibeChat.Show");
@@ -320,11 +326,67 @@ namespace VibeChat
             Activate();
         }
 
+        // ---------- shutting down ----------
+        // WhatsApp Web keeps writing its login state. If VibeChat simply exited, the WebView2 engine would be cut off
+        // mid-write and WhatsApp could ask for the QR code again next time. So: let the page unload, close the engine,
+        // and only exit once it reports it has finished and released its data.
         void QuitApp()
         {
             quitting = true;
+            if (shutdownStarted) return;
+            shutdownStarted = true;
             tray.Visible = false;
+            updateTimer.Stop(); installTimer.Stop(); retryTimer.Stop();
+            SaveBounds();
+            Hide();
+            CoreWebView2 core = web.CoreWebView2;
+            if (core == null) { FinishExit(); return; }
+            try
+            {
+                core.Environment.BrowserProcessExited += delegate { BeginInvoke(new Action(FinishExit)); };
+                core.NavigationCompleted += delegate { CloseWebView(); };   // the page has unloaded
+                shutdownTimer.Interval = 1500;                              // don't wait for that forever
+                shutdownTimer.Start();
+                core.Navigate("about:blank");
+            }
+            catch (Exception ex) { Program.LogError(ex); CloseWebView(); }
+        }
+
+        void CloseWebView()
+        {
+            if (webClosed) return;
+            webClosed = true;
+            try { Controls.Remove(web); web.Dispose(); } catch (Exception ex) { Program.LogError(ex); }
+            shutdownTimer.Stop();
+            shutdownTimer.Interval = 8000;   // safety net in case the engine never reports back
+            shutdownTimer.Start();
+        }
+
+        void FinishExit()
+        {
+            if (readyToExit) return;
+            readyToExit = true;
+            shutdownTimer.Stop();
             Application.Exit();
+        }
+
+        // Windows is signing out or shutting down and won't wait for events: close the engine and pump messages until
+        // it has finished (or a few seconds have passed).
+        void ShutDownEngineNow()
+        {
+            quitting = shutdownStarted = true;
+            tray.Visible = false;
+            CoreWebView2 core = web.CoreWebView2;
+            if (core != null && !webClosed)
+            {
+                bool exited = false;
+                try { core.Environment.BrowserProcessExited += delegate { exited = true; }; } catch { exited = true; }
+                CloseWebView();
+                shutdownTimer.Stop();
+                Stopwatch sw = Stopwatch.StartNew();
+                while (!exited && sw.ElapsedMilliseconds < 4000) { Application.DoEvents(); Thread.Sleep(15); }
+            }
+            readyToExit = true;
         }
 
         void SetMemoryTarget(bool low)
@@ -346,7 +408,13 @@ namespace VibeChat
                 Hide();
                 return;
             }
-            quitting = true;          // shutdown, logoff, installer: do not try to revive WebView2 on the way out
+            if (!readyToExit)
+            {
+                // Any other way of closing for real goes through the proper engine shutdown first.
+                if (e.CloseReason == CloseReason.WindowsShutDown) ShutDownEngineNow();
+                else { e.Cancel = true; QuitApp(); return; }
+            }
+            quitting = true;          // do not try to revive WebView2 on the way out
             base.OnFormClosing(e);
         }
 
@@ -395,6 +463,7 @@ namespace VibeChat
                 updateItem,
                 autoUpdateItem,
                 new MenuItem("-"),
+                new MenuItem("Clear data and sign out...", delegate { ClearData(); }),
                 new MenuItem("Quit", delegate { QuitApp(); })
             });
             tray.ContextMenu = menu;
@@ -414,6 +483,42 @@ namespace VibeChat
                 if (a.Button != MouseButtons.Left) return;
                 if (trayClickWasActive) Hide(); else ShowWindow();
             };
+        }
+
+        // ---------- clear data ----------
+        // Removes everything the engine has stored for WhatsApp Web (login, cached chats and media, site data), then
+        // reloads it, so the user can sign in and sync from scratch. VibeChat's own settings are kept.
+        void ClearData()
+        {
+            if (quitting) return;
+            ShowWindow();
+            if (MessageBox.Show(this,
+                    "This signs " + AppName + " out on this computer and deletes everything it has stored for WhatsApp Web: " +
+                    "the login, cached chats and media, and site data.\n\n" +
+                    "You'll scan the QR code again, and WhatsApp will sync fresh.\n\n" +
+                    "To also remove this computer from your phone's list of linked devices, choose Log out inside WhatsApp first.\n\n" +
+                    "Clear data now?",
+                    AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                ClearDataNow();
+        }
+
+        async void ClearDataNow()
+        {
+            CoreWebView2 core = web.CoreWebView2;
+            if (core == null || quitting) return;
+            try
+            {
+                core.Navigate("about:blank");   // stop WhatsApp Web writing while its data is removed
+                await Task.Delay(500);
+                await core.Profile.ClearBrowsingDataAsync();
+                Program.Log("cleared all WhatsApp Web data at the user's request");
+            }
+            catch (Exception ex)
+            {
+                Program.LogError(ex);
+                MessageBox.Show(this, "Not everything could be cleared: " + ex.Message, AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            if (!quitting && web.CoreWebView2 != null) web.CoreWebView2.Navigate(StartUrl);
         }
 
         // ---------- updates ----------
@@ -642,7 +747,7 @@ namespace VibeChat
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { tray.Dispose(); retryTimer.Dispose(); updateTimer.Dispose(); installTimer.Dispose(); }
+            if (disposing) { tray.Dispose(); retryTimer.Dispose(); updateTimer.Dispose(); installTimer.Dispose(); shutdownTimer.Dispose(); }
             base.Dispose(disposing);
             if (disposing && badgeIcon != null) badgeIcon.Dispose(); // after the form, which may still reference it
         }
