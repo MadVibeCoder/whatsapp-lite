@@ -54,6 +54,10 @@ To release a new version:
 3. Run `python3 linux/build-deb.py`.
 4. Create a GitHub release with the installers named exactly **`VibeChat-Setup.exe`** and **`VibeChat.deb`**, so the download links above keep working.
 
+## License
+
+VibeChat is released under the [MIT License](LICENSE): you're free to use, change and share it, as long as the copyright notice comes along. The Windows installer also bundles Microsoft's WebView2 SDK libraries, which are covered by Microsoft's own license.
+
 ---
 
 VibeChat is an independent project. It is not affiliated with, endorsed by, or connected to WhatsApp or Meta; "WhatsApp" is a trademark of WhatsApp LLC and is used here only to describe what the app connects to.
