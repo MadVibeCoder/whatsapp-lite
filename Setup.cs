@@ -1,9 +1,10 @@
 // Tiny per-user installer/uninstaller for WhatsApp Lite. The app files are embedded as app.zip.
-//   Setup.exe            interactive install
+//   Setup.exe            interactive install (or update over an existing install)
 //   Setup.exe /S         silent install (no prompts, no launch)
 //   Uninstall.exe        (copy of this exe placed in the install dir) uninstalls
 //   Setup.exe /uninstall [/S]
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
@@ -15,15 +16,15 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("WhatsApp Lite Setup")]
 [assembly: AssemblyProduct("WhatsApp Lite")]
 [assembly: AssemblyDescription("Installer for WhatsApp Lite")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+// Version numbers live in Version.cs (shared with the app).
 
 static class Setup
 {
     const string AppName = "WhatsApp Lite";
-    const string Exe = "WhatsApp Lite.exe";
+    const string Exe = AppName + ".exe";
     const string UninstKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\WhatsAppLite";
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const string QuitEvent = "WhatsAppLite.Quit";
 
     static string InstallDir
     {
@@ -35,6 +36,12 @@ static class Setup
     }
     static string DesktopLnk { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), AppName + ".lnk"); } }
     static string StartLnk { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), AppName + ".lnk"); } }
+
+    // e.g. "1.1.0", from Version.cs
+    static string AppVersion
+    {
+        get { Version v = Assembly.GetExecutingAssembly().GetName().Version; return v.Major + "." + v.Minor + "." + v.Build; }
+    }
 
     static bool HasArg(string[] args, string name)
     {
@@ -57,53 +64,89 @@ static class Setup
         }
     }
 
+    // Running copies of the app in this Windows session (other users' copies are not ours to stop).
+    static List<Process> AppProcesses()
+    {
+        int session = Process.GetCurrentProcess().SessionId;
+        List<Process> mine = new List<Process>();
+        foreach (Process p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(Exe)))
+        {
+            bool ours = false;
+            try { ours = p.SessionId == session; } catch { }
+            if (ours) mine.Add(p); else p.Dispose();
+        }
+        return mine;
+    }
+
+    static void DisposeAll(List<Process> procs)
+    {
+        foreach (Process p in procs) p.Dispose();
+    }
+
     // Ask a running copy to quit cleanly (so its WhatsApp session data is flushed), then force it as a last resort.
     static void StopApp()
     {
-        try { EventWaitHandle.OpenExisting("WhatsAppLite.Quit").Set(); } catch { }
+        List<Process> procs = AppProcesses();
+        if (procs.Count == 0) return;
+        try { using (EventWaitHandle ev = EventWaitHandle.OpenExisting(QuitEvent)) ev.Set(); } catch { }
         DateTime end = DateTime.UtcNow.AddSeconds(8);
-        while (DateTime.UtcNow < end && Process.GetProcessesByName("WhatsApp Lite").Length > 0) Thread.Sleep(200);
-        foreach (Process p in Process.GetProcessesByName("WhatsApp Lite"))
+        while (procs.Count > 0 && DateTime.UtcNow < end)
+        {
+            DisposeAll(procs);
+            Thread.Sleep(200);
+            procs = AppProcesses();
+        }
+        foreach (Process p in procs)
         {
             try { p.Kill(); p.WaitForExit(5000); } catch { }
+            p.Dispose();
         }
         Thread.Sleep(800); // let WebView2 helper processes exit and release their files
     }
 
     static int DoInstall(bool silent)
     {
-        if (!silent && MessageBox.Show("Install " + AppName + " to:\n" + InstallDir + "?", AppName + " setup",
+        if (!silent && MessageBox.Show("Install " + AppName + " " + AppVersion + " to:\n" + InstallDir + "?", AppName + " setup",
             MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return 2;
+
+        bool upgrade;
+        using (RegistryKey k = Registry.CurrentUser.OpenSubKey(UninstKey)) { upgrade = k != null; }
 
         StopApp();
         Directory.CreateDirectory(InstallDir);
+        string root = InstallDir + Path.DirectorySeparatorChar;
         long bytes = 0;
         using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream("app.zip"))
-        using (ZipArchive zip = new ZipArchive(s, ZipArchiveMode.Read))
         {
-            foreach (ZipArchiveEntry e in zip.Entries)
+            if (s == null) throw new InvalidOperationException("This installer is damaged (the app files are missing).");
+            using (ZipArchive zip = new ZipArchive(s, ZipArchiveMode.Read))
             {
-                if (string.IsNullOrEmpty(e.Name)) continue;
-                string dest = Path.GetFullPath(Path.Combine(InstallDir, e.FullName));
-                if (!dest.StartsWith(InstallDir + Path.DirectorySeparatorChar)) continue; // no path traversal
-                Directory.CreateDirectory(Path.GetDirectoryName(dest));
-                e.ExtractToFile(dest, true);
-                bytes += e.Length;
+                foreach (ZipArchiveEntry e in zip.Entries)
+                {
+                    if (string.IsNullOrEmpty(e.Name)) continue;
+                    string dest = Path.GetFullPath(Path.Combine(InstallDir, e.FullName));
+                    if (!dest.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue; // no path traversal
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                    e.ExtractToFile(dest, true);
+                    bytes += e.Length;
+                }
             }
         }
         string uninst = Path.Combine(InstallDir, "Uninstall.exe");
-        File.Copy(Application.ExecutablePath, uninst, true);
+        if (!string.Equals(Path.GetFullPath(Application.ExecutablePath), uninst, StringComparison.OrdinalIgnoreCase))
+            File.Copy(Application.ExecutablePath, uninst, true);
         bytes += new FileInfo(uninst).Length;
 
         string exePath = Path.Combine(InstallDir, Exe);
-        MakeShortcut(DesktopLnk, exePath);
+        // On an update, respect a desktop shortcut the user has deleted.
+        if (!upgrade || File.Exists(DesktopLnk)) MakeShortcut(DesktopLnk, exePath);
         MakeShortcut(StartLnk, exePath);
 
         using (RegistryKey k = Registry.CurrentUser.CreateSubKey(UninstKey))
         {
             k.SetValue("DisplayName", AppName);
             k.SetValue("DisplayIcon", exePath);
-            k.SetValue("DisplayVersion", "1.0.0");
+            k.SetValue("DisplayVersion", AppVersion);
             k.SetValue("Publisher", "Local");
             k.SetValue("InstallLocation", InstallDir);
             k.SetValue("UninstallString", "\"" + uninst + "\"");
@@ -113,9 +156,9 @@ static class Setup
             k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
         }
 
-        if (!silent && MessageBox.Show(AppName + " is installed.\n\nLaunch it now?", AppName + " setup",
+        if (!silent && MessageBox.Show(AppName + " " + AppVersion + " is installed.\n\nLaunch it now?", AppName + " setup",
             MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-            Process.Start(exePath);
+            using (Process.Start(new ProcessStartInfo(exePath) { WorkingDirectory = InstallDir })) { }
         return 0;
     }
 
@@ -130,19 +173,40 @@ static class Setup
         try { File.Delete(StartLnk); } catch { }
         try { Registry.CurrentUser.DeleteSubKeyTree(UninstKey, false); } catch { }
         try { using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey, true)) { if (k != null) k.DeleteValue(AppName, false); } } catch { }
+
+        List<string> leftovers = new List<string>();
+        leftovers.Add(InstallDir);
         if (wipe)
         {
             for (int i = 0; i < 4 && Directory.Exists(DataDir); i++)
             {
                 try { Directory.Delete(DataDir, true); } catch { Thread.Sleep(700); }
             }
+            if (Directory.Exists(DataDir)) leftovers.Add(DataDir); // WebView2 still had files open; retry after we exit
         }
 
-        // This exe lives in the install dir, so delete the folder from a detached helper after we exit.
-        string cmd = "/c ping 127.0.0.1 -n 3 >nul & rmdir /s /q \"" + InstallDir + "\"";
-        Process.Start(new ProcessStartInfo("cmd.exe", cmd) { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden });
         if (!silent) MessageBox.Show(AppName + " was uninstalled.", AppName + " setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        // This exe lives in the install dir, so the folder is removed by a detached helper once we have exited.
+        DeleteAfterExit(leftovers);
         return 0;
+    }
+
+    // Detached cmd.exe that retries (about once a second, for up to 30 s) until every folder is gone,
+    // so it does not matter exactly when this process gets around to exiting.
+    static void DeleteAfterExit(List<string> dirs)
+    {
+        string remove = "", allGone = "";
+        foreach (string d in dirs)
+        {
+            remove += "rmdir /s /q \"" + d + "\" 2>nul & ";
+            allGone += "if not exist \"" + d + "\" ";
+        }
+        string cmd = "/d /c for /l %i in (1,1,30) do @(ping -n 2 127.0.0.1 >nul & " + remove + allGone + "exit)";
+        ProcessStartInfo psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), cmd);
+        psi.CreateNoWindow = true;
+        psi.UseShellExecute = false;
+        psi.WorkingDirectory = Environment.SystemDirectory; // never the install dir, or it could not be removed
+        using (Process.Start(psi)) { }
     }
 
     static void MakeShortcut(string lnkPath, string target)
