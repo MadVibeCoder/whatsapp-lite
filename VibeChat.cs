@@ -1,4 +1,4 @@
-// WhatsApp Lite (WebView2) - tiny native wrapper around WhatsApp Web.
+// VibeChat (WebView2) - tiny native desktop client for WhatsApp Web. Not affiliated with WhatsApp or Meta.
 // Compiles with the C# 5 compiler that ships with Windows (no SDK needed).
 using System;
 using System.Diagnostics;
@@ -14,23 +14,23 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using Microsoft.Win32;
 
-[assembly: AssemblyTitle("WhatsApp Lite")]
-[assembly: AssemblyProduct("WhatsApp Lite")]
-[assembly: AssemblyDescription("Lightweight WhatsApp Web desktop client")]
+[assembly: AssemblyTitle("VibeChat")]
+[assembly: AssemblyProduct("VibeChat")]
+[assembly: AssemblyDescription("VibeChat - lightweight desktop client for WhatsApp Web")]
 // Version numbers live in Version.cs (shared with the installer).
 
-namespace WhatsAppLite
+namespace VibeChat
 {
     static class Program
     {
-        internal static readonly string DataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhatsAppLite");
+        internal static readonly string DataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VibeChat");
 
         [STAThread]
         static void Main(string[] args)
         {
             bool hidden = Array.IndexOf(args, "--hidden") >= 0;
             bool createdNew;
-            Mutex mutex = new Mutex(true, "WhatsAppLite.SingleInstance", out createdNew);
+            Mutex mutex = new Mutex(true, "VibeChat.SingleInstance", out createdNew);
             if (!createdNew)
             {
                 // Already running: ask that instance to show itself (but not for the silent autostart launch).
@@ -39,7 +39,7 @@ namespace WhatsAppLite
                     // We were just started by the user, so we may take the foreground; pass that right on,
                     // otherwise Windows only flashes the other instance's taskbar button.
                     NativeMethods.AllowSetForegroundWindow(NativeMethods.ASFW_ANY);
-                    try { using (EventWaitHandle ev = EventWaitHandle.OpenExisting("WhatsAppLite.Show")) ev.Set(); } catch { }
+                    try { using (EventWaitHandle ev = EventWaitHandle.OpenExisting("VibeChat.Show")) ev.Set(); } catch { }
                 }
                 mutex.Dispose();
                 return;
@@ -82,7 +82,7 @@ namespace WhatsAppLite
 
     class MainForm : Form
     {
-        const string AppName = "WhatsApp Lite";
+        const string AppName = "VibeChat";
         const string AppHost = "web.whatsapp.com";
         const string StartUrl = "https://" + AppHost + "/";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -127,8 +127,8 @@ namespace WhatsAppLite
             retryTimer.Tick += delegate { retryTimer.Stop(); if (web.CoreWebView2 != null) web.CoreWebView2.Navigate(StartUrl); };
 
             // Cross-process signals: a second launch asks us to show; the installer asks us to quit cleanly.
-            showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "WhatsAppLite.Show");
-            quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "WhatsAppLite.Quit");
+            showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "VibeChat.Show");
+            quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "VibeChat.Quit");
             Thread t = new Thread(delegate ()
             {
                 WaitHandle[] handles = new WaitHandle[] { showEvent, quitEvent };
@@ -203,7 +203,7 @@ namespace WhatsAppLite
             {
                 Program.LogError(ex);
                 if (quitting) return;
-                if (MessageBox.Show("WhatsApp Lite needs the Microsoft Edge WebView2 Runtime, which could not be started.\n\n" + ex.Message +
+                if (MessageBox.Show("VibeChat needs the Microsoft Edge WebView2 Runtime, which could not be started.\n\n" + ex.Message +
                     "\n\nOpen the download page?", AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Error) == DialogResult.Yes)
                     OpenExternal("https://developer.microsoft.com/microsoft-edge/webview2/");
                 QuitApp();
@@ -351,7 +351,7 @@ namespace WhatsAppLite
                 autoStartItem.Checked = IsAutoStart();
             };
             ContextMenu menu = new ContextMenu(new MenuItem[] {
-                new MenuItem("Open WhatsApp", delegate { ShowWindow(); }),
+                new MenuItem("Open " + AppName, delegate { ShowWindow(); }),
                 autoStartItem,
                 new MenuItem("-"),
                 new MenuItem("Quit", delegate { QuitApp(); })

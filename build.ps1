@@ -1,5 +1,5 @@
-# Builds WhatsApp Lite (WebView2) with the C# compiler that ships with Windows - no SDK required.
-# Output: dist\app\ (portable files) and dist\WhatsApp Lite Setup.exe (installer)
+# Builds VibeChat (WebView2) with the C# compiler that ships with Windows - no SDK required.
+# Output: dist\app\ (portable files) and dist\VibeChat Setup.exe (installer)
 # To release a new version, change the numbers in Version.cs.
 $ErrorActionPreference = 'Stop'
 $here   = $PSScriptRoot
@@ -28,7 +28,7 @@ if (-not (Test-Path $zip) -or (Get-FileHash $zip -Algorithm SHA256).Hash -ne $wv
 
 # 2. Clean output and take the three DLLs we ship straight from the verified package
 Remove-Item $dist -Recurse -Force -ErrorAction SilentlyContinue
-if (Test-Path $dist) { throw "Could not clean $dist - close any WhatsApp Lite running from it and retry" }
+if (Test-Path $dist) { throw "Could not clean $dist - close any VibeChat running from it and retry" }
 New-Item -ItemType Directory -Force $app | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $pkg = [IO.Compression.ZipFile]::OpenRead($zip)
@@ -41,18 +41,18 @@ try {
 } finally { $pkg.Dispose() }
 
 # 3. Compile the app
-& $csc /nologo /warn:4 /warnaserror+ /target:winexe /platform:x64 /optimize+ "/out:$app\WhatsApp Lite.exe" "/win32icon:$icon" "/win32manifest:$here\app.manifest" `
+& $csc /nologo /warn:4 /warnaserror+ /target:winexe /platform:x64 /optimize+ "/out:$app\VibeChat.exe" "/win32icon:$icon" "/win32manifest:$here\app.manifest" `
     "/reference:$app\Microsoft.Web.WebView2.Core.dll" "/reference:$app\Microsoft.Web.WebView2.WinForms.dll" `
-    /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "$here\WhatsAppLite.cs" $verCs
+    /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "$here\VibeChat.cs" $verCs
 if ($LASTEXITCODE) { throw "App compile failed" }
 
 # 4. Zip the app and embed it in the installer
 $appZip = Join-Path $dist 'app.zip'
 Compress-Archive "$app\*" $appZip -CompressionLevel Optimal
-& $csc /nologo /warn:4 /warnaserror+ /target:winexe /platform:x64 /optimize+ "/out:$dist\WhatsApp Lite Setup.exe" "/win32icon:$icon" "/win32manifest:$here\app.manifest" `
+& $csc /nologo /warn:4 /warnaserror+ /target:winexe /platform:x64 /optimize+ "/out:$dist\VibeChat Setup.exe" "/win32icon:$icon" "/win32manifest:$here\app.manifest" `
     "/resource:$appZip,app.zip" /reference:System.Windows.Forms.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll "$here\Setup.cs" $verCs
 if ($LASTEXITCODE) { throw "Installer compile failed" }
 Remove-Item $appZip
 
-"WhatsApp Lite $version"
+"VibeChat $version"
 Get-ChildItem $dist -File | Select-Object Name, @{n='MB'; e={[math]::Round($_.Length / 1MB, 2)}}

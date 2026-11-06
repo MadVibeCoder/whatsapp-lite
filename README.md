@@ -1,10 +1,12 @@
-# WhatsApp Lite
+<img src="assets/vibechat.png" alt="" width="96" align="right">
+
+# VibeChat
 
 A lightweight Windows desktop app for WhatsApp Web. The program itself is about 30 KB: instead of bundling its own copy of Chromium like Electron apps do, it uses the Microsoft Edge WebView2 engine already built into Windows.
 
-## [⬇ Download for Windows](https://github.com/MadVibeCoder/whatsapp-lite/releases/latest/download/WhatsApp-Lite-Setup.exe)
+## [⬇ Download for Windows](https://github.com/MadVibeCoder/vibechat/releases/latest/download/VibeChat-Setup.exe)
 
-1. Click **Download for Windows** above and open **WhatsApp-Lite-Setup.exe**.
+1. Click **Download for Windows** above and open **VibeChat-Setup.exe**.
 2. If Windows shows *"Windows protected your PC"*, click **More info**, then **Run anyway**. (The installer isn't code-signed yet, so Windows doesn't recognise it.)
 3. Click **OK** to install, then **Yes** to launch it.
 4. On your phone, open WhatsApp → **Linked devices** (in Settings on iPhone, the ⋮ menu on Android) → **Link a device**, and scan the QR code.
@@ -30,14 +32,16 @@ Everything builds with the C# compiler that ships with Windows; no Visual Studio
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-The build downloads the WebView2 SDK package once from NuGet and checks its SHA-256 before using it. The output goes to `dist\`: the portable app in `dist\app\` and the installer `dist\WhatsApp Lite Setup.exe`.
+The build downloads the WebView2 SDK package once from NuGet and checks its SHA-256 before using it. The output goes to `dist\`: the portable app in `dist\app\` and the installer `dist\VibeChat Setup.exe`.
+
+The icon is drawn in code by `tools\IconGen.cs`, which writes `icon.ico` and a preview sheet.
 
 To release a new version:
 
 1. Bump the numbers in `Version.cs`.
 2. Run `build.ps1`.
-3. Create a GitHub release whose installer asset is named exactly **`WhatsApp-Lite-Setup.exe`**, so the download link above keeps working.
+3. Create a GitHub release whose installer asset is named exactly **`VibeChat-Setup.exe`**, so the download link above keeps working.
 
 ---
 
-WhatsApp Lite is an independent project and is not affiliated with, endorsed by, or connected to WhatsApp or Meta.
+VibeChat is an independent project. It is not affiliated with, endorsed by, or connected to WhatsApp or Meta; "WhatsApp" is a trademark of WhatsApp LLC and is used here only to describe what the app connects to.

@@ -1,4 +1,4 @@
-// Tiny per-user installer/uninstaller for WhatsApp Lite. The app files are embedded as app.zip.
+// Tiny per-user installer/uninstaller for VibeChat. The app files are embedded as app.zip.
 //   Setup.exe            interactive install (or update over an existing install)
 //   Setup.exe /S         silent install (no prompts, no launch)
 //   Uninstall.exe        (copy of this exe placed in the install dir) uninstalls
@@ -13,18 +13,18 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: AssemblyTitle("WhatsApp Lite Setup")]
-[assembly: AssemblyProduct("WhatsApp Lite")]
-[assembly: AssemblyDescription("Installer for WhatsApp Lite")]
+[assembly: AssemblyTitle("VibeChat Setup")]
+[assembly: AssemblyProduct("VibeChat")]
+[assembly: AssemblyDescription("Installer for VibeChat")]
 // Version numbers live in Version.cs (shared with the app).
 
 static class Setup
 {
-    const string AppName = "WhatsApp Lite";
+    const string AppName = "VibeChat";
     const string Exe = AppName + ".exe";
-    const string UninstKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\WhatsAppLite";
+    const string UninstKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\VibeChat";
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    const string QuitEvent = "WhatsAppLite.Quit";
+    const string QuitEvent = "VibeChat.Quit";
 
     static string InstallDir
     {
@@ -32,7 +32,7 @@ static class Setup
     }
     static string DataDir
     {
-        get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhatsAppLite"); }
+        get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VibeChat"); }
     }
     static string DesktopLnk { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), AppName + ".lnk"); } }
     static string StartLnk { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), AppName + ".lnk"); } }
