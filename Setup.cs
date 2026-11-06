@@ -111,21 +111,42 @@ static class Setup
     static void StopApp()
     {
         List<Process> procs = AppProcesses();
-        if (procs.Count == 0) return;
-        try { using (EventWaitHandle ev = EventWaitHandle.OpenExisting(QuitEvent)) ev.Set(); } catch { }
-        DateTime end = DateTime.UtcNow.AddSeconds(8);
-        while (procs.Count > 0 && DateTime.UtcNow < end)
+        if (procs.Count > 0)
         {
-            DisposeAll(procs);
-            Thread.Sleep(200);
-            procs = AppProcesses();
+            try { using (EventWaitHandle ev = EventWaitHandle.OpenExisting(QuitEvent)) ev.Set(); } catch { }
+            DateTime end = DateTime.UtcNow.AddSeconds(8);
+            while (procs.Count > 0 && DateTime.UtcNow < end)
+            {
+                DisposeAll(procs);
+                Thread.Sleep(200);
+                procs = AppProcesses();
+            }
+            foreach (Process p in procs)
+            {
+                try { p.Kill(); p.WaitForExit(5000); } catch { }
+                p.Dispose();
+            }
         }
-        foreach (Process p in procs)
+        WaitForWebViewEngine();
+    }
+
+    // The WebView2 engine keeps this file locked while it has VibeChat's profile open - the profile that holds the
+    // WhatsApp login. It finishes saving after the app itself has gone, so wait until it lets go before files are
+    // replaced or a new version starts, rather than guessing with a fixed pause.
+    static void WaitForWebViewEngine()
+    {
+        string lockFile = Path.Combine(DataDir, "WebView2Data", "EBWebView", "lockfile");
+        DateTime end = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < end && File.Exists(lockFile))
         {
-            try { p.Kill(); p.WaitForExit(5000); } catch { }
-            p.Dispose();
+            try
+            {
+                using (new FileStream(lockFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+                return; // released
+            }
+            catch (IOException) { Thread.Sleep(200); }          // still in use
+            catch (UnauthorizedAccessException) { return; }   // not ours to judge; don't hang the install
         }
-        Thread.Sleep(800); // let WebView2 helper processes exit and release their files
     }
 
     static int DoInstall(bool silent)
