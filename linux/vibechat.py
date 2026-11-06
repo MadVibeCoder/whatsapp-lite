@@ -16,8 +16,9 @@ APP_NAME = "VibeChat"
 VERSION = "@VERSION@"  # filled in by build-deb.py
 APP_HOST = "web.whatsapp.com"
 START_URL = "https://" + APP_HOST + "/"
-# WhatsApp Web supports Safari, so present WebKitGTK as desktop Safari to avoid an "unsupported browser" page.
-USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+# WhatsApp Web supports Safari, so present WebKitGTK (the same engine) as Safari on Linux. Tested: WhatsApp accepts
+# it. Being honest about Linux keeps keyboard shortcuts on Ctrl rather than the Mac Command key.
+USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 "
               "(KHTML, like Gecko) Version/18.0 Safari/605.1.15")
 ICON = APP_ID
 ICON_UNREAD = APP_ID + "-unread"
@@ -96,6 +97,7 @@ os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
 import gi  # noqa: E402
 
 gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 try:
     gi.require_version("WebKit2", "4.1")
 except ValueError:
@@ -184,7 +186,12 @@ class VibeChat(Gtk.Application):
                              ("zoom-reset", ["<Primary>0", "<Primary>KP_0"])):
             self.set_accels_for_action("app." + action, keys)
         self.build_window()
-        self.build_tray()
+        if AppIndicator is not None:
+            # Only show a tray icon when a tray really exists (Ubuntu's AppIndicator support, KDE, ...). Without one the
+            # library falls back to a method that no longer works and the window could be hidden for good. At login the
+            # tray may appear a moment after us, so watch for it rather than checking once.
+            Gio.bus_watch_name(Gio.BusType.SESSION, "org.kde.StatusNotifierWatcher", Gio.BusNameWatcherFlags.NONE,
+                               lambda *_: self.build_tray(), lambda *_: None)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self.on_unix_signal)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, self.on_unix_signal)
         self.web.load_uri(START_URL)
@@ -193,11 +200,19 @@ class VibeChat(Gtk.Application):
         hidden = command_line.get_options_dict().contains("hidden")
         first = not self.started
         self.started = True
-        # --hidden is the login autostart: stay in the tray. A second --hidden launch is ignored too.
-        if hidden and (self.indicator is not None or not first):
+        if hidden:
+            # --hidden is the login autostart: stay in the tray. If no tray turns up shortly, show the window instead,
+            # since there would be no other way back to it. A second --hidden launch is ignored.
+            if first and self.indicator is None:
+                GLib.timeout_add_seconds(5, self.show_unless_tray)
             return 0
         self.show_window()
         return 0
+
+    def show_unless_tray(self):
+        if self.indicator is None and not self.quitting:
+            self.show_window()
+        return GLib.SOURCE_REMOVE
 
     def do_activate(self):
         self.show_window()
@@ -483,7 +498,7 @@ class VibeChat(Gtk.Application):
 
     # ----- tray -----
     def build_tray(self):
-        if AppIndicator is None:
+        if AppIndicator is None or self.indicator is not None or self.quitting:
             return
         ind = AppIndicator.Indicator.new(APP_ID, ICON, AppIndicator.IndicatorCategory.COMMUNICATIONS)
         here = os.path.dirname(os.path.realpath(__file__))
@@ -504,6 +519,8 @@ class VibeChat(Gtk.Application):
         ind.set_menu(menu)
         ind.set_secondary_activate_target(open_item)  # middle-click the tray icon opens the window
         ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        if self.unread > 0:  # messages may have arrived before the tray did
+            ind.set_icon_full(ICON_UNREAD, "%d unread" % self.unread)
         self.indicator = ind
 
     def on_autostart_toggled(self, item):
