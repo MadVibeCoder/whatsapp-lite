@@ -1,0 +1,6 @@
+# Build output (run build.ps1)
+dist/
+# WebView2 SDK package, downloaded and hash-verified by build.ps1
+.nuget-cache/
+# Pre-git copy of v1.0.0 (now in history as tag v1.0.0)
+backup/
