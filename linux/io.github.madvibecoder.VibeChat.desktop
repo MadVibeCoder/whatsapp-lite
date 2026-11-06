@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=VibeChat
+GenericName=Messenger
+Comment=Lightweight desktop client for WhatsApp Web
+Exec=vibechat
+Icon=io.github.madvibecoder.VibeChat
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=whatsapp;chat;messenger;messages;
+StartupNotify=true
+StartupWMClass=io.github.madvibecoder.VibeChat
+SingleMainWindow=true
+X-GNOME-UsesNotifications=true

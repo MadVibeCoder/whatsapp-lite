@@ -4,3 +4,6 @@ dist/
 .nuget-cache/
 # Pre-git copy of v1.0.0 (now in history as tag v1.0.0)
 backup/
+# Python bytecode
+__pycache__/
+*.pyc

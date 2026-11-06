@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- VibeChat tray icon with the unread dot (same badge as the Windows app) -->
+  <defs>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="-1" y1="-1" x2="257" y2="257">
+      <stop offset="0" stop-color="#FF5F6D"/>
+      <stop offset="1" stop-color="#FFB347"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#g)">
+    <rect x="7.68" y="12.8" width="240.64" height="194.56" rx="58.37"/>
+    <polygon points="130.56,186.88 197.12,186.88 215.04,248.32"/>
+  </g>
+  <g fill="#fff">
+    <rect x="52.2" y="80.9" width="33.69" height="58.37" rx="16.85"/>
+    <rect x="111.16" y="51.71" width="33.69" height="116.74" rx="16.85"/>
+    <rect x="170.12" y="69.22" width="33.69" height="81.72" rx="16.85"/>
+  </g>
+  <circle cx="196" cy="196" r="60" fill="#fff"/>
+  <circle cx="196" cy="196" r="44" fill="#E02E2E"/>
+</svg>

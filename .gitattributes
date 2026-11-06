@@ -1,0 +1,4 @@
+# Linux files keep Unix line endings even when checked out on Windows
+# (a CRLF shebang line would break /usr/bin/vibechat).
+linux/** text eol=lf
+linux/icons/*.svg text eol=lf
