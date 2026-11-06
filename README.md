@@ -32,6 +32,16 @@ Right-click the tray icon for **Start on login** and **Quit**; middle-click it t
 - Links open in your normal browser; only WhatsApp Web runs inside the app
 - Recovers by itself if the web engine crashes, and retries when you're offline
 - Windows: trims its memory use while hidden in the tray. Ubuntu: clicking a message notification opens that chat
+- Keeps itself up to date from this repository's releases (see below)
+
+## Updates
+
+VibeChat checks this repository's latest release a couple of minutes after it starts and then every 12 hours. A newer version is downloaded in the background and checked to be the genuine VibeChat installer for exactly that version before it is used.
+
+- **Windows:** if VibeChat is in the tray, it updates silently and comes back where it was, still logged in. If the window is open, a notification lets you restart into the new version now; otherwise it installs the next time VibeChat is in the tray.
+- **Ubuntu:** a notification offers **Install**; Ubuntu asks for your password, installs the package and VibeChat restarts.
+
+Right-click the tray icon for **Check for updates** and to turn off **Update automatically**. Versions before 1.4.0 can't update themselves, so install 1.4.0 once by hand.
 
 ## Building from source
 

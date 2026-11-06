@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -89,10 +90,25 @@ namespace VibeChat
         const int MaxBrowserRestarts = 5;
         static readonly Color Background = Color.FromArgb(0x11, 0x1b, 0x21);
 
+        // Updates come from this repository's GitHub releases.
+        const string ReleasesUrl = "https://github.com/MadVibeCoder/vibechat/releases";
+        const string SetupAsset = AppName + "-Setup.exe";
+        const int FirstUpdateCheckMs = 2 * 60 * 1000;        // let startup settle first
+        const int UpdateCheckIntervalMs = 12 * 60 * 60 * 1000;
+        const int InstallWhenHiddenMs = 30 * 1000;           // in the tray this long with an update ready: install it
+
         WebView2 web;                       // replaced if the WebView2 browser process dies
         readonly NotifyIcon tray = new NotifyIcon();
         readonly MenuItem autoStartItem = new MenuItem("Start with Windows");
+        readonly MenuItem autoUpdateItem = new MenuItem("Update automatically");
+        readonly MenuItem updateItem = new MenuItem("Check for updates");
         readonly System.Windows.Forms.Timer retryTimer = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer updateTimer = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer installTimer = new System.Windows.Forms.Timer();
+        bool checkingForUpdate;
+        bool manualUpdateCheck;
+        string pendingInstaller;            // downloaded and verified installer waiting to run
+        Version pendingVersion;
         readonly bool startHidden;
         readonly Icon baseIcon;
         Icon badgeIcon;                     // created on first unread message, then reused
@@ -125,6 +141,12 @@ namespace VibeChat
 
             retryTimer.Interval = 5000;
             retryTimer.Tick += delegate { retryTimer.Stop(); if (web.CoreWebView2 != null) web.CoreWebView2.Navigate(StartUrl); };
+
+            updateTimer.Interval = FirstUpdateCheckMs;
+            updateTimer.Tick += delegate { updateTimer.Interval = UpdateCheckIntervalMs; CheckForUpdates(false); };
+            if (Updater.AutoEnabled) updateTimer.Start();
+            installTimer.Interval = InstallWhenHiddenMs;
+            installTimer.Tick += delegate { installTimer.Stop(); if (!Visible) InstallUpdate(); };
 
             // Cross-process signals: a second launch asks us to show; the installer asks us to quit cleanly.
             showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "VibeChat.Show");
@@ -182,6 +204,9 @@ namespace VibeChat
         {
             base.OnVisibleChanged(e);
             SetMemoryTarget(!Visible); // trim RAM while hidden in the tray; messages still arrive
+            // A downloaded update installs once the window has been tucked away in the tray for a little while.
+            if (Visible) installTimer.Stop();
+            else if (pendingInstaller != null && Updater.AutoEnabled) installTimer.Start();
         }
 
         protected override void OnDeactivate(EventArgs e)
@@ -350,9 +375,25 @@ namespace VibeChat
                 try { SetAutoStart(!autoStartItem.Checked); } catch (Exception ex) { Program.LogError(ex); }
                 autoStartItem.Checked = IsAutoStart();
             };
+            autoUpdateItem.Checked = Updater.AutoEnabled;
+            autoUpdateItem.Click += delegate
+            {
+                Updater.AutoEnabled = !autoUpdateItem.Checked;
+                autoUpdateItem.Checked = Updater.AutoEnabled;
+                if (Updater.AutoEnabled) { updateTimer.Interval = FirstUpdateCheckMs; updateTimer.Start(); }
+                else { updateTimer.Stop(); installTimer.Stop(); }
+            };
+            updateItem.Click += delegate { if (pendingInstaller != null) InstallUpdate(); else CheckForUpdates(true); };
+            tray.BalloonTipClicked += delegate { if (pendingInstaller != null) InstallUpdate(); };
+            MenuItem versionItem = new MenuItem(AppName + " " + Updater.Format(Updater.Current));
+            versionItem.Enabled = false;
             ContextMenu menu = new ContextMenu(new MenuItem[] {
                 new MenuItem("Open " + AppName, delegate { ShowWindow(); }),
                 autoStartItem,
+                new MenuItem("-"),
+                versionItem,
+                updateItem,
+                autoUpdateItem,
                 new MenuItem("-"),
                 new MenuItem("Quit", delegate { QuitApp(); })
             });
@@ -373,6 +414,85 @@ namespace VibeChat
                 if (a.Button != MouseButtons.Left) return;
                 if (trayClickWasActive) Hide(); else ShowWindow();
             };
+        }
+
+        // ---------- updates ----------
+        void CheckForUpdates(bool manual)
+        {
+            if (checkingForUpdate || quitting) return;
+            if (pendingInstaller != null) { if (manual) OfferUpdate(); return; }
+            checkingForUpdate = true;
+            manualUpdateCheck = manual;
+            updateItem.Enabled = false;
+            updateItem.Text = "Checking for updates...";
+            Thread t = new Thread(delegate ()
+            {
+                Version latest = null;
+                string installer = null, error = null;
+                try
+                {
+                    latest = Updater.Latest(ReleasesUrl);
+                    if (latest != null && latest > Updater.Current)
+                        installer = Updater.Download(ReleasesUrl, SetupAsset, latest, AppName);
+                }
+                catch (Exception ex) { error = ex.Message; Program.Log("update check failed: " + ex.Message); }
+                try { BeginInvoke(new Action(delegate { UpdateCheckDone(latest, installer, error); })); }
+                catch (InvalidOperationException) { /* window already gone */ }
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        void UpdateCheckDone(Version latest, string installer, string error)
+        {
+            checkingForUpdate = false;
+            updateItem.Enabled = true;
+            updateItem.Text = "Check for updates";
+            if (installer != null)
+            {
+                pendingInstaller = installer;
+                pendingVersion = latest;
+                updateItem.Text = "Restart to update to " + Updater.Format(latest);
+                Program.Log("update " + Updater.Format(latest) + " downloaded and verified");
+                if (!Visible && Updater.AutoEnabled) InstallUpdate();   // in the tray: nobody is looking, just do it
+                else OfferUpdate();
+                return;
+            }
+            if (manualUpdateCheck)
+            {
+                if (error != null) tray.ShowBalloonTip(5000, AppName, "Couldn't check for updates: " + error, ToolTipIcon.Warning);
+                else tray.ShowBalloonTip(5000, AppName, "You're up to date (version " + Updater.Format(Updater.Current) + ").", ToolTipIcon.Info);
+            }
+        }
+
+        void OfferUpdate()
+        {
+            tray.ShowBalloonTip(10000, AppName + " " + Updater.Format(pendingVersion) + " is ready",
+                "Click here to restart and update now. Otherwise it installs the next time " + AppName + " is in the tray.",
+                ToolTipIcon.Info);
+        }
+
+        // Run the downloaded installer silently; it closes us, updates the files and starts the new version.
+        void InstallUpdate()
+        {
+            installTimer.Stop();
+            if (pendingInstaller == null || quitting) return;
+            if (!File.Exists(pendingInstaller)) { pendingInstaller = null; updateItem.Text = "Check for updates"; return; }
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(pendingInstaller, "/S " + (Visible ? "/launch" : "/launch-hidden"));
+                psi.UseShellExecute = false;
+                psi.WorkingDirectory = Path.GetDirectoryName(pendingInstaller);
+                using (Process.Start(psi)) { }
+            }
+            catch (Exception ex)
+            {
+                Program.LogError(ex);
+                tray.ShowBalloonTip(5000, AppName, "The update couldn't be started: " + ex.Message, ToolTipIcon.Warning);
+                return;
+            }
+            Program.Log("installing update " + Updater.Format(pendingVersion));
+            QuitApp();
         }
 
         void OnTitle(string title)
@@ -522,9 +642,110 @@ namespace VibeChat
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { tray.Dispose(); retryTimer.Dispose(); }
+            if (disposing) { tray.Dispose(); retryTimer.Dispose(); updateTimer.Dispose(); installTimer.Dispose(); }
             base.Dispose(disposing);
             if (disposing && badgeIcon != null) badgeIcon.Dispose(); // after the form, which may still reference it
+        }
+    }
+
+    // Finds, downloads and verifies new releases. Network work only (runs off the UI thread); the window decides
+    // when to install.
+    static class Updater
+    {
+        static readonly string OffFlag = Path.Combine(Program.DataDir, "auto-update-off");
+
+        internal static Version Current
+        {
+            get { Version v = Assembly.GetExecutingAssembly().GetName().Version; return new Version(v.Major, v.Minor, v.Build); }
+        }
+
+        internal static string Format(Version v)
+        {
+            return v == null ? "?" : v.Major + "." + v.Minor + "." + Math.Max(0, v.Build);
+        }
+
+        internal static bool AutoEnabled
+        {
+            get { return !File.Exists(OffFlag); }
+            set
+            {
+                try
+                {
+                    if (value) File.Delete(OffFlag);
+                    else
+                    {
+                        Directory.CreateDirectory(Program.DataDir);
+                        File.WriteAllText(OffFlag, "Automatic update checks are off. Use the tray menu, or delete this file, to turn them back on.\r\n");
+                    }
+                }
+                catch (Exception ex) { Program.LogError(ex); }
+            }
+        }
+
+        static HttpWebRequest Request(string url)
+        {
+            // This exe declares no .NET target version, so the runtime would default to old TLS versions GitHub refuses.
+            try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch (NotSupportedException) { }
+            try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288; } catch (NotSupportedException) { } // TLS 1.3 where available
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            req.UserAgent = "VibeChat/" + Format(Current) + " (+https://github.com/MadVibeCoder/vibechat)";
+            req.Timeout = 30000;
+            req.ReadWriteTimeout = 60000;
+            req.KeepAlive = false;  // a fresh connection each time; reusing one after an unread reply fails in .NET Framework
+            return req;
+        }
+
+        // The newest release's version, read from where GitHub's "latest release" page redirects (no API, no rate limit).
+        internal static Version Latest(string releasesUrl)
+        {
+            HttpWebRequest req = Request(releasesUrl + "/latest");
+            req.Method = "HEAD";            // only the redirect matters, not the page
+            req.AllowAutoRedirect = false;
+            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+            {
+                Match m = Regex.Match(resp.Headers["Location"] ?? "", @"/releases/tag/v?(\d+(?:\.\d+){1,3})/?$");
+                return m.Success ? new Version(m.Groups[1].Value) : null;
+            }
+        }
+
+        // Downloads the installer for version v and checks it really is ours, at exactly that version, before it is
+        // trusted (an error page, a different file or a mismatched version is rejected).
+        internal static string Download(string releasesUrl, string asset, Version v, string productName)
+        {
+            string dir = Path.Combine(Path.GetTempPath(), productName + "-Update");
+            try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch (Exception) { /* leftovers in use; overwrite below */ }
+            Directory.CreateDirectory(dir);
+            string part = Path.Combine(dir, "download.part");
+            string url = releasesUrl + "/download/v" + Format(v) + "/" + asset;
+            HttpWebRequest req = Request(url);
+            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+            {
+                if (resp.ResponseUri.Scheme != new Uri(url).Scheme)
+                    throw new InvalidDataException("the download was redirected to an insecure address");
+                using (Stream s = resp.GetResponseStream())
+                using (FileStream f = File.Create(part))
+                {
+                    byte[] buf = new byte[81920];
+                    long total = 0;
+                    int n;
+                    while ((n = s.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        total += n;
+                        if (total > 64L * 1024 * 1024) throw new InvalidDataException("the download is unexpectedly large");
+                        f.Write(buf, 0, n);
+                    }
+                }
+            }
+            FileVersionInfo info = FileVersionInfo.GetVersionInfo(part);
+            if (info.ProductName != productName || info.ProductVersion != Format(v))
+            {
+                try { File.Delete(part); } catch (Exception) { }
+                throw new InvalidDataException("the download is not the " + productName + " " + Format(v) + " installer");
+            }
+            string exe = Path.Combine(dir, productName + "-Setup-" + Format(v) + ".exe");
+            if (File.Exists(exe)) File.Delete(exe);
+            File.Move(part, exe);
+            return exe;
         }
     }
 

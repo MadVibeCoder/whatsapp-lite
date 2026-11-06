@@ -1,6 +1,9 @@
 // Tiny per-user installer/uninstaller for VibeChat. The app files are embedded as app.zip.
 //   Setup.exe            interactive install (or update over an existing install)
 //   Setup.exe /S         silent install (no prompts, no launch)
+//   Setup.exe /S /launch | /launch-hidden
+//                        silent install, then start the app (hidden in the tray). Used by the app's own updater;
+//                        if the install fails, the existing app is started again so the user is not left without it.
 //   Uninstall.exe        (copy of this exe placed in the install dir) uninstalls
 //   Setup.exe /uninstall [/S]
 using System;
@@ -55,13 +58,34 @@ static class Setup
         bool silent = HasArg(args, "/S");
         bool uninstall = HasArg(args, "/uninstall") ||
             string.Equals(Path.GetFileNameWithoutExtension(Application.ExecutablePath), "Uninstall", StringComparison.OrdinalIgnoreCase);
+        bool launchHidden = HasArg(args, "/launch-hidden");
+        bool launch = launchHidden || HasArg(args, "/launch");
         Application.EnableVisualStyles();
-        try { return uninstall ? DoUninstall(silent) : DoInstall(silent); }
+        try
+        {
+            int result = uninstall ? DoUninstall(silent) : DoInstall(silent);
+            if (launch && !uninstall && result == 0) LaunchApp(launchHidden);
+            return result;
+        }
         catch (Exception ex)
         {
             if (!silent) MessageBox.Show(ex.Message, AppName + " setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (launch && !uninstall) LaunchApp(launchHidden); // an update failed: bring back the version that was running
             return 1;
         }
+    }
+
+    static void LaunchApp(bool hidden)
+    {
+        string exePath = Path.Combine(InstallDir, Exe);
+        if (!File.Exists(exePath)) return;
+        try
+        {
+            ProcessStartInfo psi = new ProcessStartInfo(exePath, hidden ? "--hidden" : "");
+            psi.WorkingDirectory = InstallDir;
+            using (Process.Start(psi)) { }
+        }
+        catch (Exception) { /* nothing more we can do silently */ }
     }
 
     // Running copies of the app in this Windows session (other users' copies are not ours to stop).

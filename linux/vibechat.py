@@ -3,13 +3,20 @@
 # The Linux counterpart of VibeChat.cs. Not affiliated with WhatsApp or Meta.
 # Needs: python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, gir1.2-ayatanaappindicator3-0.1 (tray, optional)
 import importlib
+import io
 import json
 import os
 import re
+import shlex
+import shutil
 import signal
 import sys
+import tarfile
+import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 
 APP_ID = "io.github.madvibecoder.VibeChat"
 APP_NAME = "VibeChat"
@@ -24,6 +31,11 @@ ICON = APP_ID
 ICON_UNREAD = APP_ID + "-unread"
 MAX_WEB_RESTARTS = 5
 RETRY_SECONDS = 5
+# Updates come from this repository's GitHub releases.
+RELEASES_URL = "https://github.com/MadVibeCoder/vibechat/releases"
+DEB_ASSET = "VibeChat.deb"
+FIRST_UPDATE_CHECK = 120              # seconds after start, so startup settles first
+UPDATE_CHECK_INTERVAL = 12 * 60 * 60
 BACKGROUND = (0x11 / 255, 0x1B / 255, 0x21 / 255)  # WhatsApp Web's dark background: no white flash while loading
 OFFLINE_HTML = """<!doctype html><meta charset="utf-8"><body style="margin:0;height:100vh;display:flex;align-items:center;
 justify-content:center;background:#111b21;color:#aebac1;font:15px system-ui,sans-serif">
@@ -83,6 +95,93 @@ def desktop_exec_quote(arg):
     return '"' + re.sub(r'(["`$\\])', r"\\\1", arg) + '"'
 
 
+def parse_version(text):
+    """'v1.4.0' or '1.4.0' -> (1, 4, 0); anything else (e.g. an unbuilt '@VERSION@') -> None."""
+    m = re.fullmatch(r"v?(\d+(?:\.\d+){1,3})", (text or "").strip())
+    return tuple(int(p) for p in m.group(1).split(".")) if m else None
+
+
+def format_version(version):
+    return ".".join(str(p) for p in version)
+
+
+def release_version_from_url(url):
+    """GitHub sends /releases/latest on to /releases/tag/v1.4.0; read the version from there (no API needed)."""
+    m = re.search(r"/releases/tag/(v?\d+(?:\.\d+){1,3})/?$", url or "")
+    return parse_version(m.group(1)) if m else None
+
+
+def deb_control(path):
+    """The fields of a .deb's control file (Package, Version, ...), read without dpkg."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:8] != b"!<arch>\n":
+        raise ValueError("not a .deb package")
+    pos = 8
+    while pos + 60 <= len(data):
+        name = data[pos:pos + 16].decode("ascii", "replace").strip().rstrip("/")
+        size = int(data[pos + 48:pos + 58])
+        body = data[pos + 60:pos + 60 + size]
+        pos += 60 + size + (size & 1)
+        if name.startswith("control.tar"):
+            with tarfile.open(fileobj=io.BytesIO(body)) as tar:
+                for member in tar.getmembers():
+                    if member.name.lstrip("./") == "control":
+                        text = tar.extractfile(member).read().decode("utf-8", "replace")
+                        return dict(re.findall(r"^([A-Za-z0-9-]+):[ \t]*(.*?)\s*$", text, re.M))
+    raise ValueError("no control file in the package")
+
+
+class _KeepRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # don't follow: the redirect target itself is the answer
+
+
+def fetch_latest_version():
+    """Ask where /releases/latest redirects to, without fetching that page."""
+    request = urllib.request.Request(RELEASES_URL + "/latest", method="HEAD",
+                                     headers={"User-Agent": "VibeChat/%s (Linux)" % VERSION})
+    try:
+        with urllib.request.build_opener(_KeepRedirect).open(request, timeout=30):
+            return None  # no redirect: there is no release yet
+    except urllib.error.HTTPError as e:
+        if e.code not in (301, 302, 303, 307, 308):
+            raise
+        return release_version_from_url(urllib.parse.urljoin(RELEASES_URL, e.headers.get("Location", "")))
+
+
+def download_update(version, folder):
+    """Download the .deb for version and make sure it really is VibeChat at exactly that version before trusting it."""
+    v = format_version(version)
+    shutil.rmtree(folder, ignore_errors=True)
+    os.makedirs(folder)
+    part = os.path.join(folder, "download.part")
+    url = "%s/download/v%s/%s" % (RELEASES_URL, v, DEB_ASSET)
+    request = urllib.request.Request(url, headers={"User-Agent": "VibeChat/%s (Linux)" % VERSION})
+    with urllib.request.urlopen(request, timeout=60) as response, open(part, "wb") as out:
+        if urllib.parse.urlsplit(response.geturl()).scheme != urllib.parse.urlsplit(url).scheme:
+            raise ValueError("the download was redirected to an insecure address")
+        total = 0
+        while True:
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 64 * 1024 * 1024:
+                raise ValueError("the download is unexpectedly large")
+            out.write(chunk)
+    try:
+        fields = deb_control(part)
+        if fields.get("Package") != "vibechat" or fields.get("Version") != v:
+            raise ValueError("the download is not the VibeChat %s package" % v)
+    except (ValueError, OSError, tarfile.TarError):
+        os.remove(part)  # never keep a file we refused
+        raise
+    deb = os.path.join(folder, "vibechat_%s_all.deb" % v)
+    os.replace(part, deb)
+    return deb
+
+
 def spell_languages(names):
     """GLib language names (e.g. ['en_CA.UTF-8', 'en_CA', 'en', 'C']) -> spell-checker codes."""
     langs = [n for n in names if re.fullmatch(r"[a-z]{2,3}_[A-Z]{2}", n)]
@@ -126,6 +225,10 @@ def autostart_file():
     return os.path.join(GLib.get_user_config_dir(), "autostart", APP_ID + ".desktop")
 
 
+def auto_update_flag():
+    return os.path.join(config_dir(), "auto-update-off")
+
+
 def log(message):
     """A tray app should not die noisily; keep a small log instead."""
     try:
@@ -156,6 +259,11 @@ class VibeChat(Gtk.Application):
         self.started = False
         self.notifications = {}
         self.state = {}
+        self.update_item = None
+        self.checking_update = False
+        self.installing_update = False
+        self.pending_deb = None             # downloaded and verified package waiting to be installed
+        self.pending_version = None
 
     # ----- lifecycle -----
     def do_handle_local_options(self, options):
@@ -180,6 +288,9 @@ class VibeChat(Gtk.Application):
         clicked = Gio.SimpleAction.new("notification-clicked", GLib.VariantType.new("t"))
         clicked.connect("activate", self.on_notification_clicked)
         self.add_action(clicked)
+        self.add_simple_action("check-updates", lambda *_: self.check_for_updates(True))
+        self.add_simple_action("install-update", lambda *_: self.install_update())
+        GLib.timeout_add_seconds(FIRST_UPDATE_CHECK, self.on_first_update_check)
         for action, keys in (("quit", ["<Primary>q"]), ("hide", ["<Primary>w"]), ("reload", ["F5", "<Primary>r"]),
                              ("zoom-in", ["<Primary>plus", "<Primary>equal", "<Primary>KP_Add"]),
                              ("zoom-out", ["<Primary>minus", "<Primary>KP_Subtract"]),
@@ -496,6 +607,134 @@ class VibeChat(Gtk.Application):
         n.set_icon(Gio.ThemedIcon.new(ICON))
         self.send_notification("download", n)
 
+    # ----- updates -----
+    def on_first_update_check(self):
+        self.on_periodic_update_check()
+        GLib.timeout_add_seconds(UPDATE_CHECK_INTERVAL, self.on_periodic_update_check)
+        return GLib.SOURCE_REMOVE
+
+    def on_periodic_update_check(self):
+        if not os.path.exists(auto_update_flag()):
+            self.check_for_updates(False)
+        return GLib.SOURCE_CONTINUE
+
+    def check_for_updates(self, manual):
+        if self.checking_update or self.installing_update or self.quitting:
+            return
+        if self.pending_deb:
+            if manual:
+                self.offer_update()
+            return
+        if parse_version(VERSION) is None:  # running unbuilt source: nothing to compare against
+            return
+        self.checking_update = True
+        self.set_update_item("Checking for updates…", False)
+        folder = os.path.join(GLib.get_user_cache_dir(), "vibechat", "update")
+        threading.Thread(target=self.update_worker, args=(manual, folder), daemon=True).start()
+
+    def update_worker(self, manual, folder):  # runs off the GTK thread
+        latest = deb = error = None
+        try:
+            latest = fetch_latest_version()
+            if latest and latest > parse_version(VERSION):
+                deb = download_update(latest, folder)
+        except Exception as e:  # network, HTTP or verification problems all just mean "not this time"
+            error = str(e)
+            log("update check failed: %s" % e)
+        GLib.idle_add(self.update_check_done, manual, latest, deb, error)
+
+    def update_check_done(self, manual, latest, deb, error):
+        self.checking_update = False
+        self.set_update_item("Check for updates", True)
+        if deb:
+            self.pending_deb, self.pending_version = deb, latest
+            log("update %s downloaded and verified" % format_version(latest))
+            self.set_update_item("Install update %s…" % format_version(latest), True)
+            self.offer_update()
+        elif manual:
+            n = Gio.Notification.new("Couldn't check for updates" if error else APP_NAME + " is up to date")
+            n.set_body(error or "You have version %s." % VERSION)
+            n.set_icon(Gio.ThemedIcon.new(ICON))
+            self.send_notification("updates", n)
+        return GLib.SOURCE_REMOVE
+
+    def offer_update(self):
+        n = Gio.Notification.new("%s %s is ready to install" % (APP_NAME, format_version(self.pending_version)))
+        n.set_body("Your password is needed to install it. %s restarts afterwards." % APP_NAME)
+        n.set_icon(Gio.ThemedIcon.new(ICON))
+        n.add_button("Install", "app.install-update")
+        n.set_default_action("app.install-update")
+        self.send_notification("updates", n)
+
+    def install_update(self):
+        if not self.pending_deb or self.installing_update or self.quitting:
+            return
+        if not os.path.exists(self.pending_deb):
+            self.pending_deb = None
+            self.set_update_item("Check for updates", True)
+            return
+        self.withdraw_notification("updates")
+        pkexec = GLib.find_program_in_path("pkexec")
+        if not pkexec:  # no polkit: hand the package to the system's software installer instead
+            Gio.AppInfo.launch_default_for_uri(GLib.filename_to_uri(self.pending_deb, None), None)
+            return
+        self.installing_update = True
+        self.set_update_item("Installing update…", False)
+        # pkexec shows the system's password prompt; apt-get installs the verified package like any other.
+        proc = Gio.Subprocess.new([pkexec, "apt-get", "install", "-y", self.pending_deb],
+                                  Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_PIPE)
+        proc.communicate_utf8_async(None, None, self.on_update_installed)
+
+    def on_update_installed(self, proc, result):
+        self.installing_update = False
+        try:
+            _, _, err = proc.communicate_utf8_finish(result)
+        except GLib.Error as e:
+            err = e.message
+        code = proc.get_exit_status() if proc.get_if_exited() else -1
+        if code == 0:
+            log("updated to %s; restarting" % format_version(self.pending_version))
+            self.restart()
+            return
+        log("update not installed (exit %d): %s" % (code, (err or "").strip()[-400:]))
+        self.set_update_item("Install update %s…" % format_version(self.pending_version), True)
+        n = Gio.Notification.new(APP_NAME + " wasn't updated")
+        n.set_body("The password prompt was cancelled." if code in (126, 127) else "The update couldn't be installed.")
+        n.set_icon(Gio.ThemedIcon.new(ICON))
+        self.send_notification("updates", n)
+
+    def restart(self):
+        hidden = not self.window.get_visible()
+        exe = shutil.which("vibechat") or "/usr/bin/vibechat"
+        # The new copy starts once this one has gone, so it becomes the single running instance.
+        Gio.Subprocess.new(["/bin/sh", "-c", "sleep 2; exec %s%s" % (shlex.quote(exe), " --hidden" if hidden else "")],
+                           Gio.SubprocessFlags.NONE)
+        self.quit_app()
+
+    def set_update_item(self, label, sensitive):
+        if self.update_item is not None:
+            self.update_item.set_label(label)
+            self.update_item.set_sensitive(sensitive)
+
+    def on_update_item(self, *_):
+        if self.pending_deb:
+            self.install_update()
+        else:
+            self.check_for_updates(True)
+
+    def on_auto_update_toggled(self, item):
+        path = auto_update_flag()
+        try:
+            if item.get_active():
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("Automatic update checks are off. Use the tray menu, or delete this file, to turn them back on.\n")
+        except OSError as e:
+            log("auto-update setting: %s" % e)
+
     # ----- tray -----
     def build_tray(self):
         if AppIndicator is None or self.indicator is not None or self.quitting:
@@ -511,9 +750,19 @@ class VibeChat(Gtk.Application):
         self.autostart_item = Gtk.CheckMenuItem(label="Start on login")
         self.autostart_item.set_active(os.path.exists(autostart_file()))
         self.autostart_item.connect("toggled", self.on_autostart_toggled)
+        version_item = Gtk.MenuItem(label="%s %s" % (APP_NAME, VERSION))
+        version_item.set_sensitive(False)
+        self.update_item = Gtk.MenuItem(label="Check for updates")
+        self.update_item.connect("activate", self.on_update_item)
+        if self.pending_deb:  # an update may have been found before the tray appeared
+            self.update_item.set_label("Install update %s…" % format_version(self.pending_version))
+        auto_update_item = Gtk.CheckMenuItem(label="Update automatically")
+        auto_update_item.set_active(not os.path.exists(auto_update_flag()))
+        auto_update_item.connect("toggled", self.on_auto_update_toggled)
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", lambda *_: self.quit_app())
-        for item in (open_item, self.autostart_item, Gtk.SeparatorMenuItem(), quit_item):
+        for item in (open_item, self.autostart_item, Gtk.SeparatorMenuItem(), version_item, self.update_item,
+                     auto_update_item, Gtk.SeparatorMenuItem(), quit_item):
             menu.append(item)
         menu.show_all()
         ind.set_menu(menu)
