@@ -9,7 +9,7 @@ A lightweight desktop app for WhatsApp Web, for Windows and Ubuntu. Instead of b
 1. Click **Download for Windows** above and open **VibeChat-Setup.exe**.
 2. If Windows shows *"Windows protected your PC"*, click **More info**, then **Run anyway**. (The installer isn't code-signed yet, so Windows doesn't recognise it.)
 3. Click **OK** to install, then **Yes** to launch it.
-4. On your phone, open WhatsApp → **Linked devices** (in Settings on iPhone, the ⋮ menu on Android) → **Link a device**, and scan the QR code.
+4. On your phone, open WhatsApp → **Linked devices** (in Settings on iPhone, the ⋮ menu on Android) → **Link a device**, and scan the QR code. Leave VibeChat open for a few minutes afterwards while WhatsApp syncs your chats for the first time; quitting during that first sync can make WhatsApp ask for the QR code again.
 
 No admin rights needed. It installs just for you, adds Start menu and desktop shortcuts, and can be removed any time from **Settings → Apps**. Installing a newer version updates it in place and keeps you logged in.
 
